@@ -1,0 +1,115 @@
+###### ALTERNATIVE
+
+import nibabel as nib
+import numpy as np
+from statsmodels.stats.multitest import multipletests
+from scipy import stats
+
+
+def bayesian_hypothesis_test(case, controls, sd=None, sample_size=None, alternative='two.sided', int_level=0.95, iter=10000, na_rm=False):
+    # Convert inputs to numpy arrays if not already
+    case = np.asarray(case)
+    controls = np.asarray(controls)
+    
+    # Check if inputs are numeric
+    if not np.issubdtype(case.dtype, np.number) or not np.issubdtype(controls.dtype, np.number):
+        raise ValueError("Inputs 'case' and 'controls' must be numeric.")
+    
+    # Check if case is NA
+    if np.isnan(case).any():
+        raise ValueError("Case contains NA values.")
+    
+    # Remove NA values from controls if na_rm is True
+    if na_rm:
+        controls = controls[~np.isnan(controls)]
+    
+    # Compute mean and standard deviation of controls
+    if np.std(controls, ddof=1) == 0:
+        # Set a super small non-zero value for sigma
+        s = 1e-10
+    else:
+        s = np.std(controls, ddof=1)
+    
+    # If sample size is provided, use it, otherwise use the length of controls
+    if sample_size is not None:
+        n = sample_size
+    else:
+        n = len(controls)
+    
+    # Compute degrees of freedom for t-distribution
+    df = n - 1
+    
+    # Compute Bayesian estimates
+    theta_hat = ((n - 1) * s**2) / np.random.chisquare(df, size=iter)
+    z = np.random.normal(size=iter)
+    mu_hat = np.mean(controls) + (z * np.sqrt(theta_hat / n))
+    z_ast = (case - mu_hat) / np.sqrt(theta_hat)
+    
+    # Calculate p-values based on alternative hypothesis
+    if alternative == "less":
+        pval = stats.norm.cdf(z_ast)
+    elif alternative == "greater":
+        pval = 1 - stats.norm.cdf(z_ast)
+    elif alternative == "two.sided":
+        pval = 2 * (1 - stats.norm.cdf(np.abs(z_ast)))
+    
+    # Estimate parameters and confidence intervals
+    p_est = np.mean(pval)
+    p_int = np.percentile(pval, q=[(1 - int_level) * 100 / 2, (1 + int_level) * 100 / 2])
+    
+    return p_est, p_int
+
+# Input and output file paths
+patient_file = '/PATH_TO_SINGLE_PATIENT/SINGLE_PATIENT_FILE.nii.gz'  # Patient image file path
+control_folder = '/PATH_TO_CONTROL_PATIENTS'  # Control images folder
+out_p_values_file = '/PATH_TO_OUTPUT/bayesian_p-values.nii.gz'  # Output file path for p-values
+
+# Load the patient image
+patient_img = nib.load(patient_file)
+in_dtype = patient_img.get_data_dtype()
+patient_data = patient_img.get_fdata(dtype=in_dtype)
+shape = patient_data.shape
+
+# Load control data one by one and append
+control_data = []
+for i in range(1, 28):
+    control_img = nib.load(f'{control_folder}/{i:03d}.nii.gz')
+    control_data.append(control_img.get_fdata())
+
+# Convert control_data to a NumPy array
+control_data = np.array(control_data)
+
+# Initialize p-values array
+p_values = np.zeros(shape)
+
+# Iterate over voxel indices (3D)
+for i in range(shape[0]):
+    for j in range(shape[1]):
+        for k in range(shape[2]):
+            # Extract voxel data
+            patient_voxel_data = patient_data[i, j, k]
+            control_voxel_data = control_data[:, i, j, k]
+
+            # Compute Bayesian hypothesis test for the voxel
+            p_est, _ = bayesian_hypothesis_test(patient_voxel_data, control_voxel_data)
+
+            # Assign p-value to the corresponding voxel
+            p_values[i, j, k] = p_est
+
+# Build the p-value map
+p_values_img = nib.Nifti1Image(p_values, affine=patient_img.affine)
+nib.save(p_values_img, out_p_values_file)
+
+# Apply FDR correction
+flat_p_values = p_values.flatten()
+reject, corrected_p_values, _, _ = multipletests(flat_p_values, method='fdr_bh')
+
+# Reshape the corrected p-values back to the original shape
+corrected_p_values_3d = corrected_p_values.reshape(shape)
+
+# Output file path for corrected p-values
+out_corrected_p_values_file = '/PATH_TO_OUTPUT/bayesian_corrected_p-values.nii.gz'
+
+# Build the corrected p-value map
+corrected_p_values_img = nib.Nifti1Image(corrected_p_values_3d, affine=patient_img.affine)
+nib.save(corrected_p_values_img, out_corrected_p_values_file)
